@@ -14,8 +14,9 @@ import re
 import queue
 import threading
 from datetime import datetime, timedelta
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization, hashes
@@ -464,7 +465,6 @@ class SFTPClient:
         else:
             yield from self._list_files_non_recursive(remote_dir, pattern, batch_size)
 
-
     def _list_files_non_recursive(self, remote_dir: str, pattern: str, batch_size: int):
         """列出远程目录中的文件（非递归，支持远程路径正则表达式过滤）"""
         try:
@@ -572,7 +572,8 @@ class SFTPConfig:
 
     def __init__(self, config_file: str):
         self.config_file = config_file
-        self.config = self._load_config()
+        self.inner_config = self._load_config()
+        logger.info(f"已加载配置文件: {self.config_file}")
 
     def _load_config(self):
         """加载配置文件"""
@@ -605,44 +606,54 @@ class SFTPConfig:
 
     def process_all_expressions(self):
         """处理所有配置项中的表达式"""
-        self.config = self._process_value(self.config)
+        self.inner_config = self._process_value(self.inner_config)
 
-    def get(self, key: str, default=None):
+    def get_setting(self):
         """获取全局配置项"""
-        return self.config.get(key, default)
+        setting = self.inner_config.get("setting")
+        self._validate_setting_config(setting)
+        return setting
 
     def get_server(self, server_name: str) -> Dict:
         """获取服务器配置"""
-        servers = self.config.get('servers', None)
+        servers = self.inner_config.get('servers')
         if not servers:
             logger.error("配置文件必须包含 'servers' 部分")
             sys.exit(1)
-        server_config = servers.get(server_name, None)
+        server_config = servers.get(server_name)
         if not server_config:
             logger.error(f"服务器 '{server_name}' 不存在")
             sys.exit(1)
+        self._validate_server_config(server_name, server_config)
         return server_config
 
-    def get_all_servers(self) -> List[str]:
-        """获取所有服务器名称"""
-        return list(self.config.get('servers', {}).keys())
-
-    def validate_server_config(self, server_name: str) -> bool:
+    @staticmethod
+    def _validate_setting_config(setting: Dict):
         """验证服务器配置是否完整"""
-        server_config = self.get_server(server_name)
-        
+        if not setting:
+            logger.error("配置文件必须包含 'setting' 部分")
+            sys.exit(1)
+
+        for field in ['log_dir', 'temp_dir', 'batch_delay', 'max_retries', 'max_threads', 'retry_delay', 'preserve_timestamps']:
+            if not setting.get(field):
+                logger.error(f"'setting' 缺少配置字段: {field}")
+                sys.exit(1)
+
+    @staticmethod
+    def _validate_server_config(server_name: str, server_config: Dict):
+        """验证服务器配置是否完整"""
+
         # 验证基本连接字段
-        required_basic_fields = ['host', 'port', 'username', 'password']
-        for field in required_basic_fields:
+        for field in ['host', 'port', 'username', 'password']:
             if not server_config.get(field):
                 logger.error(f"服务器 '{server_name}' 缺少配置字段: {field}")
-                return False
+                sys.exit(1)
         
         # 验证备份设置数组
         backup_settings = server_config.get('backup_settings', [])
         if not backup_settings:
             logger.error(f"服务器 '{server_name}' 缺少 backup_settings 配置")
-            return False
+            sys.exit(1)
         
         # 验证每个备份设置的必要字段
         required_setting_fields = ['remote_dir', 'backup_dir']
@@ -650,22 +661,20 @@ class SFTPConfig:
             for field in required_setting_fields:
                 if not setting.get(field):
                     logger.error(f"服务器 '{server_name}' 的第 {i+1} 个备份设置缺少字段: {field}")
-                    return False
-        
-        return True
+                    sys.exit(1)
 
 
 class FileManager:
     """文件同步管理器"""
 
-    def __init__(self, config: SFTPConfig, decryptor: PasswordDecryptor):
-        self.config = config
+    def __init__(self, setting: Dict, decryptor: PasswordDecryptor):
         self.decryptor = decryptor
-        self.batch_delay = config.get('batch_delay')
-        self.max_retries = config.get('max_retries', 3)
-        self.retry_delay = config.get('retry_delay', 30)
-        self.max_threads = config.get('max_threads', 5)
-        self.temp_dir = config.get('temp_dir')  # 临时目录配置
+        self.batch_delay = setting.get('batch_delay', 30)
+        self.max_retries = setting.get('max_retries', 3)
+        self.retry_delay = setting.get('retry_delay', 30)
+        self.max_threads = setting.get('max_threads', 5)
+        self.temp_dir = setting.get('temp_dir')  # 临时目录配置
+        self.preserve_timestamps = setting.get('preserve_timestamps', True)
         self.connection_pools = {}  # 连接池缓存
 
     def _get_connection_pool(self, server_config: Dict) -> SFTPConnectionPool:
@@ -695,7 +704,8 @@ class FileManager:
             pool.close_all()
         self.connection_pools.clear()
 
-    def _calculate_local_file_md5(self, file_path: str) -> str:
+    @staticmethod
+    def _calculate_local_file_md5(file_path: str) -> str:
         """计算本地文件的MD5"""
         hash_md5 = hashlib.md5()
         try:
@@ -724,7 +734,8 @@ class FileManager:
                     pool.return_connection(conn)
         return ""
 
-    def __get_local_file_info(self, file_path: str) -> Dict:
+    @staticmethod
+    def __get_local_file_info(file_path: str) -> Dict:
         """获取本地文件信息"""
         try:
             stat = os.stat(file_path)
@@ -811,7 +822,7 @@ class FileManager:
                 # 使用连接池下载到临时文件
                 with SFTPClient(connection_pool) as client:
                     if client.download_file(remote_info['path'], str(temp_file),
-                                            self.config.get('preserve_timestamps', True)):
+                                            self.preserve_timestamps):
 
                         # 检查临时文件大小
                         if temp_file.exists() and temp_file.stat().st_size == remote_info['size']:
@@ -829,7 +840,7 @@ class FileManager:
                                 logger.info(f"✓ 文件已下载并移动到: {final_filename}")
 
                                 # 如果配置了保持时间戳，设置时间戳
-                                if self.config.get('preserve_timestamps', True):
+                                if self.preserve_timestamps:
                                     with SFTPClient(connection_pool) as timestamp_client:
                                         remote_attr = timestamp_client.current_connection.sftp_client.stat(
                                             remote_info['path'])
@@ -932,15 +943,18 @@ class FileManager:
                     success = 0
                     fail = 0
 
-                    for remote_files_info in client.list_files(remote_dir, pattern, recursive, batch_size):
-                        if not remote_files_info:
-                            logger.info(f"远程目录为空: {remote_dir}")
-                            continue
-                        total_size += len(remote_files_info)
-                        logger.info(f"已获取第 {batch} 批文件, 当前批次数量: {len(remote_files_info)}, 已获取总数量: {total_size}")
+                    # 使用线程池下载
+                    with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
 
-                        # 使用线程池下载
-                        with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
+                        for remote_files_info in client.list_files(remote_dir, pattern, recursive, batch_size):
+
+                            if not remote_files_info:
+                                logger.info(f"远程目录为空: {remote_dir}")
+                                continue
+                            total_size += len(remote_files_info)
+                            logger.info(
+                                f"已获取第 {batch} 批文件, 当前批次数量: {len(remote_files_info)}, 已获取总数量: {total_size}")
+
                             futures = []
 
                             for remote_file in remote_files_info:
@@ -960,11 +974,11 @@ class FileManager:
                                 else:
                                     fail += 1
 
-                        # 批次间的延迟
-                        logger.info(f"已处理第 {batch} 批文件, 等待 {self.batch_delay} 秒")
-                        time.sleep(self.batch_delay)
+                            # 批次间的延迟
+                            logger.info(f"已处理第 {batch} 批文件, 等待 {self.batch_delay} 秒")
+                            time.sleep(self.batch_delay)
 
-                        batch += 1
+                            batch += 1
 
                     logger.info(f"处理完成 文件总数量 {total_size} 成功 {success}, 失败 {fail}")
 
@@ -995,16 +1009,19 @@ class SFTPFileSync:
     def __init__(self):
         self.args = self._parse_arguments()
         self.config = SFTPConfig(self.args.config)
-        self.decryptor = PasswordDecryptor()
-
-        self._setup_logging()
-        logger.info(f"已加载配置文件: {self.args.config}")
-
         self.config.process_all_expressions()
-        self._cleanup_temp_files()
 
+    @staticmethod
+    def _parse_arguments():
+        """解析命令行参数"""
+        parser = argparse.ArgumentParser(description="SFTP文件同步工具")
+        parser.add_argument('--server', required=True, help='配置文件中的服务器名称')
+        parser.add_argument('--config', default=CONFIG_FILE, help=f'配置文件路径 (默认: {CONFIG_FILE})')
+        return parser.parse_args()
 
-    def _setup_logging(self):
+    # todo 将滚动日志参数调整为配置项
+    @staticmethod
+    def _setup_logging(log_dir: str):
         """配置日志系统"""
         logger.setLevel(logging.INFO)
 
@@ -1016,34 +1033,37 @@ class SFTPFileSync:
         logger.addHandler(console_handler)
 
         # 文件处理器（可选）
-        log_dir = self.config.get('log_dir')
         if log_dir:
             # 处理日志目录中的表达式
             log_dir = ExpressionProcessor.process_path(log_dir)
             Path(log_dir).mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_file = Path(log_dir) / f"sftp_sync_{timestamp}.log"
+            log_file = Path(log_dir) / f"sftp_sync.log"
 
-            file_handler = logging.FileHandler(log_file, encoding='utf-8')
-            file_handler.setLevel(logging.INFO)
             file_formatter = logging.Formatter(
                 '%(asctime)s - %(levelname)s - [%(name)s] - %(message)s',
                 datefmt='%Y-%m-%d %H:%M:%S'
             )
+
+            # 创建自定义的滚动处理器
+            file_handler = TimedRotatingFileHandler(
+                filename=str(log_file),
+                when='H',  # 按小时滚动
+                interval=6,
+                backupCount=0,
+                encoding='utf-8',
+                delay=False
+            )
+
+            # 设置滚动时间后缀格式
+            file_handler.suffix = "rolling_6h_%Y%m%d_%H"
             file_handler.setFormatter(file_formatter)
+            file_handler.setLevel(logging.INFO)
+
             logger.addHandler(file_handler)
 
     @staticmethod
-    def _parse_arguments():
-        """解析命令行参数"""
-        parser = argparse.ArgumentParser(description="SFTP文件同步工具")
-        parser.add_argument('--server', required=True, help='配置文件中的服务器名称')
-        parser.add_argument('--config', default=CONFIG_FILE, help=f'配置文件路径 (默认: {CONFIG_FILE})')
-        return parser.parse_args()
-
-    def _cleanup_temp_files(self):
+    def _cleanup_temp_files(temp_dir: str):
         """清理临时文件"""
-        temp_dir = self.config.get('temp_dir')
         if temp_dir:
             temp_path = Path(temp_dir)
             if temp_path.exists():
@@ -1056,35 +1076,28 @@ class SFTPFileSync:
 
     def run(self):
         """运行同步任务"""
+        # 显示处理的路径
+        setting = self.config.get_setting()
+        temp_dir = setting.get('temp_dir')
+
+        self._setup_logging(setting.get('log_dir'))
+        self._cleanup_temp_files(temp_dir)
+
+        server_name = self.args.server
+        server = self.config.get_server(server_name)
+
+        # 同步服务器
+        sync_manager = FileManager(setting, PasswordDecryptor())
+
+        logger.info("=" * 50)
+        logger.info(f"开始同步服务器: {server_name}")
+        logger.info("=" * 50)
+
         try:
-            # 显示处理的路径
-            server_name = self.args.server
-            if not self.config.validate_server_config(server_name):
-                sys.exit(1)
-
-            logger.info("=" * 50)
-            logger.info(f"开始同步服务器: {server_name}")
-            logger.info("=" * 50)
-
-            # 同步服务器
-            sync_manager = FileManager(self.config, self.decryptor)
-            overall_success = True
-
-            logger.info("-" * 30)
-            logger.info(f"正在同步服务器: {server_name}")
-            logger.info("-" * 30)
-
-            server_config = self.config.get_server(server_name)
-            success = sync_manager.download_files(server_config)
-
-            if success:
+            if sync_manager.download_files(server):
                 logger.info(f"服务器 '{server_name}' 同步完成")
             else:
                 logger.error(f"服务器 '{server_name}' 同步失败")
-
-            # 同步完成后关闭所有连接
-            sync_manager.close_all_connections()
-            sys.exit(0 if overall_success else 1)
         except KeyboardInterrupt:
             logger.info("用户中断操作")
             sys.exit(1)
@@ -1094,7 +1107,9 @@ class SFTPFileSync:
             traceback.print_exc()
             sys.exit(1)
         finally:
-            self._cleanup_temp_files()
+            # 同步完成后关闭所有连接
+            sync_manager.close_all_connections()
+            self._cleanup_temp_files(temp_dir)
 
 
 def main():

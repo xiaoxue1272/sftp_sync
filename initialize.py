@@ -53,15 +53,15 @@ def create_example_config():
         print("\n创建示例配置文件...")
 
         example_config = '''{
-  "temp_dir": "./temp",
-  "log_dir": "./logs",
-  "batch_size": 1000,
-  "batch_delay": 30,
-  "max_retries": 3,
-  "max_threads": 10,
-  "retry_delay": 30,
-  "preserve_timestamps": true,
-
+  "setting": {
+    "temp_dir": "./temp",
+    "log_dir": "./logs",
+    "batch_delay": 30,
+    "max_retries": 3,
+    "max_threads": 10,
+    "retry_delay": 30,
+    "preserve_timestamps": true
+  },
   "servers": {
     "test": {
       "host": "sftp.host.com",
@@ -190,7 +190,6 @@ def main():
     print("   python rsa_encrypt.py 'your_password'  # 加密密码")
     print("")
     print("2. 编辑配置文件 sftp_config.json，填入加密后的密码")
-    print("   注意: 配置文件中新增了temp_dir配置项，用于指定临时文件存储目录，以及batch_delay配置项，用于设置批次间延迟时间（秒）")
     print("")
     print("3. 测试同步:")
     print("   python main.py --server test")
