@@ -56,13 +56,6 @@ class ExpressionProcessor:
         if not expr or not expr.strip():
             return expr
 
-        # 检查是否是 ${...} 格式
-        match = re.match(r'^\$\{([^}]+)}$', expr.strip())
-        if not match:
-            return expr  # 不是表达式，直接返回原值
-
-        expr_content = match.group(1)
-
         try:
             # 使用更安全的方式执行表达式，限制可用的命名空间
             allowed_names = {
@@ -70,7 +63,7 @@ class ExpressionProcessor:
                 "datetime": datetime,
                 "timedelta": timedelta,
             }
-            result = eval(expr_content, allowed_names)
+            result = eval(expr, allowed_names)
             return result
         except Exception as e:
             logger.warning(f"表达式执行失败: {expr} - {e}")
@@ -98,15 +91,15 @@ class ExpressionProcessor:
         result = path_str
 
         # 查找所有 ${...} 表达式
-        pattern = re.compile(r'\$\{([^}]+)}')
+        pattern_regex = re.compile(r'\$\{([^}]+)}')
 
-        for match in pattern.finditer(path_str):
+        for match in pattern_regex.finditer(path_str):
             expr = match.group(1)
             full_expr = match.group(0)  # 完整的 ${...} 表达式
 
             try:
                 # 执行表达式
-                result_value = ExpressionProcessor.evaluate_to_string(full_expr)
+                result_value = ExpressionProcessor.evaluate_to_string(expr)
 
                 # 替换原表达式
                 result = result.replace(full_expr, result_value)
@@ -212,7 +205,7 @@ class SFTPConnection:
                 # 尝试执行一个简单的命令来检查连接
                 self.ssh_client.exec_command('echo test', timeout=5)
                 return True
-        except Exception:
+        except:
             return False
 
     def close(self):
@@ -467,6 +460,10 @@ class SFTPClient:
 
     def _list_files_non_recursive(self, remote_dir: str, pattern: str, batch_size: int):
         """列出远程目录中的文件（非递归，支持远程路径正则表达式过滤）"""
+        if pattern:
+            pattern_regex = re.compile(pattern)
+        else:
+            pattern_regex = None
         try:
             self.current_connection.sftp_client.chdir(remote_dir)
             items = self.current_connection.sftp_client.listdir_attr('.')
@@ -478,7 +475,7 @@ class SFTPClient:
                         item_path = f"{remote_dir.rstrip('/')}/{item.filename}"
                         
                         # 检查远程路径正则表达式
-                        if pattern and not re.match(pattern, item.filename):
+                        if pattern_regex and not pattern_regex.search(item.filename):
                             continue
                         files_info.append(
                             {
@@ -498,7 +495,10 @@ class SFTPClient:
 
     def _list_files_recursive(self, remote_dir: str, pattern: str, batch_size: int):
         """递归列出远程目录中的文件（支持文件名模式过滤和远程路径正则表达式过滤）"""
-
+        if pattern:
+            pattern_regex = re.compile(pattern)
+        else:
+            pattern_regex = None
         try:
             # 使用栈来遍历目录结构
             dir_stack = [remote_dir]
@@ -525,7 +525,7 @@ class SFTPClient:
                                     relative_path = item_path[len(remote_dir):].lstrip('/')
                                 else:
                                     relative_path = item_path.lstrip('/')
-                                if pattern and not re.search(pattern, relative_path):
+                                if pattern_regex and not pattern_regex.search(relative_path):
                                     continue
                                 files_info.append(
                                     {
@@ -760,7 +760,7 @@ class FileManager:
                 remote_md5 = self._calculate_remote_file_md5(remote_file_info['path'])
                 return local_md5 == remote_md5
             return True
-        except Exception:
+        except:
             return False
 
     def download_file_with_retry(self, connection_pool: SFTPConnectionPool, remote_info: Dict,
@@ -913,11 +913,6 @@ class FileManager:
             recursive = setting.get('recursive', False)
             check_by_md5 = setting.get('check_by_md5', False)
             batch_size = setting.get('batch_size', 1000)
-
-            # 处理filename配置项（支持表达式）
-            if pattern:
-                # 使用PathExpressionProcessor处理表达式
-                pattern = ExpressionProcessor.process_path(pattern)
 
             try:
                 # 首先获取远程文件列表
