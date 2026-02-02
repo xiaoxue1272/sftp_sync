@@ -755,7 +755,7 @@ class FileManager:
             # 如果配置了MD5检查，则验证MD5
             if check_by_md5:
                 # 获取本地文件MD5
-                local_md5 = self._calculate_local_file_md5(local_file_info.get('path'))
+                local_md5 = self._calculate_local_file_md5(local_file_info['path'])
                 # 获取远程文件MD5
                 remote_md5 = self._calculate_remote_file_md5(remote_file_info['path'])
                 return local_md5 == remote_md5
@@ -890,7 +890,7 @@ class FileManager:
                 except Exception as e:
                     logger.error(f"删除临时目录失败 {temp_dir}: {e}")
 
-    def download_files(self, server_config: Dict) -> bool:
+    def handle_server(self, server_config: Dict) -> bool:
         """从服务器下载文件"""
         # 获取连接池
         connection_pool = self._get_connection_pool(server_config)
@@ -913,11 +913,6 @@ class FileManager:
             recursive = setting.get('recursive', False)
             check_by_md5 = setting.get('check_by_md5', False)
             batch_size = setting.get('batch_size', 1000)
-
-            if not remote_dir or not backup_dir:
-                logger.error(f"备份设置中缺少 remote_dir 或 backup_dir 配置: {setting}")
-                overall_success = False
-                continue
 
             # 处理filename配置项（支持表达式）
             if pattern:
@@ -1094,7 +1089,7 @@ class SFTPFileSync:
         logger.info("=" * 50)
 
         try:
-            if sync_manager.download_files(server):
+            if sync_manager.handle_server(server):
                 logger.info(f"服务器 '{server_name}' 同步完成")
             else:
                 logger.error(f"服务器 '{server_name}' 同步失败")
